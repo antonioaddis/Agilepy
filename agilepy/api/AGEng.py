@@ -77,7 +77,7 @@ class AGEng:
         self.plottingUtils = PlottingUtils(self.config, self.logger)
 
 
-    def visibilityPlot(self, tmin, tmax, src_x, src_y, ref, zmax=60, step=1, writeFiles=True, computeHistogram=True, logfilesIndex=None, saveImage=True, fileFormat="png", title="Visibility Plot"):
+    def visibilityPlot(self, tmin, tmax, src_x, src_y, ref, zmax=60, step=1, skipidle=True, writeFiles=True, computeHistogram=True, logfilesIndex=None, saveImage=True, fileFormat="png", title="Visibility Plot"):
         """ It computes the angular separations between the center of the
         AGILE GRID field of view and the coordinates for a given position in the sky,
         given by src_ra and src_dec.
@@ -89,6 +89,7 @@ class AGEng:
             src_y (float): source position y (unit: degrees)
             zmax (float): maximum zenith distance of the source to the center of the detector (unit: degrees)
             step (integer): time interval in seconds between 2 consecutive points in the resulting plot. Minimum accepted value: 0.1 s.
+            skipidle (bool) (optional): If true, values with MODE=IDLE will be skipped
             writeFiles (bool): if True, two text files with the separions data will be written on file.
             logfilesIndex (str) (optional): the index file for the logs files. If specified it will ovverride the one in the configuration file.
             saveImage (bool): If True, the image will be saved on disk
@@ -104,7 +105,9 @@ class AGEng:
             skyCordsFK5.ra.deg
             skyCordsFK5.dec.deg
         """
-        separations, ti_tt, tf_tt, ti_mjd, tf_mjd, src_ra, src_dec, sepFile = self._computePointingDistancesFromSource(tmin, tmax, src_x, src_y, ref, zmax, step, writeFiles, logfilesIndex)
+        #print(f"\n\n===> tmin:{tmin}, tmax:{tmax}, src_x:{src_x}, src_y:{src_y}, ref:{ref}, zmax:{zmax}, step:{step}, writeFiles:{writeFiles}, logfilesIndex:{logfilesIndex}, skipidle:{skipidle}")
+
+        separations, ti_tt, tf_tt, ti_mjd, tf_mjd, src_ra, src_dec, sepFile = self._computePointingDistancesFromSource(tmin, tmax, src_x, src_y, ref, zmax, step, writeFiles, logfilesIndex, skipidle=skipidle)
 
         vis_plot = self.plottingUtils.visibilityPlot(separations, ti_tt, tf_tt, ti_mjd, tf_mjd, src_ra, src_dec, zmax, step, saveImage, self.outdir, fileFormat, title)
         hist_plot = None
@@ -114,7 +117,7 @@ class AGEng:
 
         return vis_plot, hist_plot
 
-    def _computePointingDistancesFromSource(self, tmin, tmax, src_x, src_y, ref, zmax, step, writeFiles, logfilesIndex):
+    def _computePointingDistancesFromSource(self, tmin, tmax, src_x, src_y, ref, zmax, step, writeFiles, logfilesIndex, skipidle=True):
         """ It computes the angular separations between the center of the
         AGILE GRID field of view and the coordinates for a given position in the sky,
         given by src_ra and src_dec.
@@ -127,8 +130,8 @@ class AGEng:
             zmax (float): maximum zenith distance of the source to the center of the detector (unit: degrees)
             step (integer): time interval in seconds between 2 consecutive points in the resulting plot. Minimum accepted value: 0.1 s.
             writeFiles (bool): if True, two text files with the separions data will be written on file.
-            logfilesIndex (str) (optional): the index file for the logs files. If specified it will ovverride the one in the configuration file.
-
+            logfilesIndex (str): the index file for the logs files. If specified it will ovverride the one in the configuration file.
+            skipidle (bool) (optional): If true, values with MODE=IDLE will be skipped
 
         Returns:
             separations (List): the angular separations
@@ -196,7 +199,7 @@ class AGEng:
                 doTimeMask = False
 
 
-            separation, ti_tt, tf_tt = self._computeSeparationPerFile(doTimeMask, logFile, tmin_start, tmax_start, skyCordsFK5, zmax, step)
+            separation, ti_tt, tf_tt = self._computeSeparationPerFile(doTimeMask, logFile, tmin_start, tmax_start, skyCordsFK5, zmax, step, skipidle)
 
             if not init:
                 separation_tot = separation
@@ -208,7 +211,7 @@ class AGEng:
                 ti_tt_tot = np.concatenate((ti_tt_tot, ti_tt), axis=0)
                 tf_tt_tot = np.concatenate((tf_tt_tot, tf_tt), axis=0)
 
-            self.logger.debug(self, "Total computed separations: %d", len(separation_tot))
+        self.logger.debug(self, "Total computed separations: %d", len(separation_tot))
 
         # Conversion TT => MJD
         self.logger.info(self, "Converting ti_tt_tot from TT to MJD..Number of elements=%d", len(ti_tt_tot))
@@ -252,11 +255,14 @@ class AGEng:
 
         return separation_tot, ti_tt_tot, tf_tt_tot, ti_mjd, tf_mjd, skyCordsFK5.ra.deg, skyCordsFK5.dec.deg, filenamePath
 
-    def _computeSeparationPerFile(self, doTimeMask, logFile, tmin_start, tmax_start, skyCordsFK5, zmax, step):
+    def _computeSeparationPerFile(self, doTimeMask, logFile, tmin_start, tmax_start, skyCordsFK5, zmax, step, skipidle):
 
         logFile = AgilepyConfig._expandEnvVar(logFile)
+
         hdulist = fits.open(logFile)
         SC = hdulist[1].data
+        hdulist.close()
+
         self.logger.debug(self, "Total events: %f", len(SC["TIME"]))
         self.logger.debug(self,"tmin: %f",tmin_start)
         self.logger.debug(self,"tmin log file: %f",SC["TIME"][0])
@@ -264,31 +270,41 @@ class AGEng:
         self.logger.debug(self,"tmax log file: %f",SC["TIME"][-1])
 
         self.logger.debug(self, "Do time mask? %d",doTimeMask)
+        self.logger.debug(self, "Do IDLE mask? %d",skipidle)
+
+        TIME = SC['TIME']
+        ATTITUDE_RA_Y= SC['ATTITUDE_RA_Y']
+        ATTITUDE_DEC_Y= SC['ATTITUDE_DEC_Y']
+        MODE = SC['MODE']
 
         if doTimeMask:
 
-            self.logger.debug(self, "How many times are >= tmin_start? %d",np.sum(SC['TIME'] >= tmin_start))
-            self.logger.debug(self, "How many times are <= tmax_start? %d",np.sum(SC['TIME'] <= tmax_start))
+            self.logger.debug(self, "How many 'times' are >= tmin_start? %d",np.sum(SC['TIME'] >= tmin_start))
+            self.logger.debug(self, "How many 'times' are <= tmax_start? %d",np.sum(SC['TIME'] <= tmax_start))
 
             # Filtering out
             booleanMask = np.logical_and(SC['TIME'] >= tmin_start, SC['TIME'] <= tmax_start)
-            TIME = SC['TIME'][booleanMask]
-            ATTITUDE_RA_Y= SC['ATTITUDE_RA_Y'][booleanMask]
-            ATTITUDE_DEC_Y= SC['ATTITUDE_DEC_Y'][booleanMask]
+            TIME = TIME[booleanMask]
+            ATTITUDE_RA_Y= ATTITUDE_RA_Y[booleanMask]
+            ATTITUDE_DEC_Y= ATTITUDE_DEC_Y[booleanMask]
+            MODE = MODE[booleanMask]
             self.logger.debug(self, "Time mask: %d values skipped"%(np.sum(np.logical_not(booleanMask))))
 
 
-        else:
-            TIME = SC['TIME']
-            ATTITUDE_RA_Y= SC['ATTITUDE_RA_Y']
-            ATTITUDE_DEC_Y= SC['ATTITUDE_DEC_Y']
+        if skipidle:
+            self.logger.debug(self, "How many IDLE values? %d",np.sum(SC['MODE'] == 0))
+            booleanMaskMode = MODE != 0
+            TIME = TIME[booleanMaskMode]
+            ATTITUDE_RA_Y= ATTITUDE_RA_Y[booleanMaskMode]
+            ATTITUDE_DEC_Y= ATTITUDE_DEC_Y[booleanMaskMode]
+            MODE = MODE[booleanMaskMode]
+            self.logger.debug(self, "IDLE mask: %d values skipped"%(np.sum(np.logical_not(booleanMaskMode))))
 
-        hdulist.close()
+
 
         # This is to avoid problems with moments for which the AGILE pointing was set to RA=NaN, DEC=NaN
         booleanMaskRA = np.logical_not(np.isnan(ATTITUDE_RA_Y))
         booleanMaskDEC = np.logical_not(np.isnan(ATTITUDE_DEC_Y))
-
         booleanMaskRADEC = np.logical_or(booleanMaskRA, booleanMaskDEC)
 
         TIME = TIME[booleanMaskRA]
